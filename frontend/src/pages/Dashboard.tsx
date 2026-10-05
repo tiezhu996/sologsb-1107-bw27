@@ -8,6 +8,7 @@ import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
 import { useSampleStore } from '../stores/sampleStore'
 import { isGapOutOfTolerance } from '../utils/stripe'
+import { isSampleUnsettled } from '../utils/reconcile'
 
 function startOfCurrentWeek(): Date {
   const date = new Date()
@@ -65,6 +66,18 @@ export default function Dashboard() {
     }),
     [runById, samples],
   )
+  const latestScanBatch = useMemo(
+    () => samples.reduce<string | undefined>((max, sample) => {
+      const current = sample.lastScanBatch
+      if (!current) return max
+      return !max || current > max ? current : max
+    }, undefined),
+    [samples],
+  )
+  const unsettledSamples = useMemo(
+    () => samples.filter((sample) => isSampleUnsettled(sample, latestScanBatch)),
+    [latestScanBatch, samples],
+  )
   const activeRate = moulds.length ? Math.round((activeMoulds.length / moulds.length) * 100) : 0
   const error = mouldError ?? batchError ?? runError ?? sampleError
 
@@ -86,6 +99,7 @@ export default function Dashboard() {
         <StatBadge label="纤维料批" value={batches.length} detail="覆盖四类造纸纤维" tone="bamboo" />
         <StatBadge label="本周工序" value={currentWeekRuns.length} detail="按自然周统计" tone="bamboo" />
         <StatBadge label="待复检样本" value={pendingSamples.length} detail="匀度或帘纹偏差需复核" tone={pendingSamples.length ? 'warning' : 'neutral'} />
+        <StatBadge label="未落实样本" value={unsettledSamples.length} detail="柜位争议或漏扫仍留旧柜" tone={unsettledSamples.length ? 'warning' : 'neutral'} />
       </Box>
 
       <Grid container spacing={2.5}>
@@ -139,6 +153,52 @@ export default function Dashboard() {
           </Card>
         </Grid>
       </Grid>
+
+      <Card>
+        <CardContent sx={{ p: { xs: 2, md: 3 } }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 1.5 }}>
+            <Box>
+              <Typography variant="h5">未落实样本</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                柜位争议处理前不占新格；最新一批清点漏扫的样本仍留在原柜。
+                {latestScanBatch ? ` 最近清点批次：${latestScanBatch}` : ' 尚未导入清点扫描。'}
+              </Typography>
+            </Box>
+            <Chip label={`${unsettledSamples.length} 条待落实`} color={unsettledSamples.length ? 'warning' : 'success'} />
+          </Box>
+          <Box sx={{ overflowX: 'auto' }}>
+            <Table size="small" sx={{ minWidth: 640 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>样本号</TableCell>
+                  <TableCell>本机柜位</TableCell>
+                  <TableCell>清点器柜位</TableCell>
+                  <TableCell>状态</TableCell>
+                  <TableCell>搬迁批次</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {unsettledSamples.map((sample) => (
+                  <TableRow key={sample.id ?? sample.sampleNo} sx={{ bgcolor: '#fff8df' }} data-testid="unsettled-row">
+                    <TableCell sx={{ fontWeight: 700 }}>{sample.sampleNo}</TableCell>
+                    <TableCell>{sample.archiveBin}</TableCell>
+                    <TableCell>{sample.binConflict ? (sample.conflictBin ?? sample.scannedBin ?? '—') : '漏扫，仍在原柜'}</TableCell>
+                    <TableCell>
+                      <Chip size="small" color="warning" label={sample.binConflict ? '柜位争议' : '漏扫留柜'} />
+                    </TableCell>
+                    <TableCell>{sample.relocationBatch || '搬迁前旧柜'}</TableCell>
+                  </TableRow>
+                ))}
+                {unsettledSamples.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center" sx={{ py: 4 }}>所有样本柜位均已落实</TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </Box>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardContent sx={{ p: { xs: 2, md: 3 } }}>

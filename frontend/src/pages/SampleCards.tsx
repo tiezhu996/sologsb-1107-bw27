@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Button, Card, CardContent, Chip, Grid, Stack, TextField, Typography } from '@mui/material'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Box, Button, Card, CardContent, Chip, Grid, Stack, TextField, Tooltip, Typography } from '@mui/material'
 import { GrainStripePreview } from '../components/common/GrainStripePreview'
 import { RulerInput } from '../components/common/RulerInput'
 import { StatBadge } from '../components/common/StatBadge'
@@ -7,8 +7,10 @@ import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
 import { useSampleStore } from '../stores/sampleStore'
-import { EVENNESS_LEVELS, type EvennessLevel, type PaperSampleInput } from '../types/paper-sample'
+import { EVENNESS_LEVELS, type EvennessLevel, type PaperSample, type PaperSampleInput } from '../types/paper-sample'
 import { isGapOutOfTolerance } from '../utils/stripe'
+import { isSampleUnsettled, parseScanFile } from '../utils/reconcile'
+import { buildDemoScanFile } from '../utils/scanFixture'
 
 const emptySampleForm: PaperSampleInput = {
   sampleNo: '',
@@ -28,8 +30,14 @@ function stripeTier(count: number): { label: string; color: 'success' | 'info' |
 export default function SampleCards() {
   const samples = useSampleStore((state) => state.paperSamples)
   const error = useSampleStore((state) => state.error)
+  const notice = useSampleStore((state) => state.notice)
   const loadSamples = useSampleStore((state) => state.loadSamples)
   const addSample = useSampleStore((state) => state.addSample)
+  const changeLocalBin = useSampleStore((state) => state.changeLocalBin)
+  const importScanFile = useSampleStore((state) => state.importScanFile)
+  const settleConflictKeepLocal = useSampleStore((state) => state.settleConflictKeepLocal)
+  const settleConflictKeepScanned = useSampleStore((state) => state.settleConflictKeepScanned)
+  const clearNotice = useSampleStore((state) => state.clearNotice)
   const runs = useRunStore((state) => state.sheetRuns)
   const runError = useRunStore((state) => state.error)
   const loadRuns = useRunStore((state) => state.loadRuns)
@@ -40,7 +48,12 @@ export default function SampleCards() {
   const [form, setForm] = useState<PaperSampleInput>(emptySampleForm)
   const [evennessFilter, setEvennessFilter] = useState<EvennessLevel | '全部'>('全部')
   const [stripeFloor, setStripeFloor] = useState(0)
+  const [onlyUnsettled, setOnlyUnsettled] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [editingBinId, setEditingBinId] = useState<number | null>(null)
+  const [binDraft, setBinDraft] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const { mmToCm, formatGrammage } = useUnitConvert()
 
   useEffect(() => {
@@ -51,9 +64,27 @@ export default function SampleCards() {
 
   const runById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const mouldById = useMemo(() => new Map(moulds.map((mould) => [mould.id, mould])), [moulds])
+  const latestBatch = useMemo(
+    () => samples.reduce<string | undefined>((max, sample) => {
+      const current = sample.lastScanBatch
+      if (!current) return max
+      return !max || current > max ? current : max
+    }, undefined),
+    [samples],
+  )
+  const unsettledSamples = useMemo(
+    () => samples.filter((sample) => isSampleUnsettled(sample, latestBatch)),
+    [latestBatch, samples],
+  )
+  const conflictSamples = useMemo(() => samples.filter((sample) => sample.binConflict), [samples])
   const filteredSamples = useMemo(
-    () => samples.filter((sample) => (evennessFilter === '全部' || sample.evenness === evennessFilter) && sample.stripeCount >= stripeFloor),
-    [evennessFilter, samples, stripeFloor],
+    () => samples.filter(
+      (sample) =>
+        (evennessFilter === '全部' || sample.evenness === evennessFilter) &&
+        sample.stripeCount >= stripeFloor &&
+        (!onlyUnsettled || isSampleUnsettled(sample, latestBatch)),
+    ),
+    [evennessFilter, latestBatch, onlyUnsettled, samples, stripeFloor],
   )
   const denseCount = samples.filter((sample) => sample.stripeCount >= 50).length
   const recheckCount = samples.filter((sample) => sample.evenness !== '均匀').length
@@ -73,6 +104,38 @@ export default function SampleCards() {
     }
   }
 
+  const handleScanFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = event.target.files?.[0]
+    event.target.value = ''
+    if (!picked) return
+    setImporting(true)
+    try {
+      const text = await picked.text()
+      const parsed = parseScanFile(text)
+      await importScanFile(parsed)
+    } catch (reason) {
+      // 解析错误不涉及写入，直接提示，不需要回滚
+      useSampleStore.setState({ error: reason instanceof Error ? reason.message : '扫描结果读取失败' })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleDemoImport = async () => {
+    setImporting(true)
+    const demo = buildDemoScanFile(samples.map((sample) => sample.sampleNo))
+    await importScanFile(demo)
+    setImporting(false)
+  }
+
+  const saveBinDraft = async (sample: PaperSample) => {
+    if (sample.id === undefined) return
+    if (binDraft.trim() && binDraft.trim() !== sample.archiveBin) {
+      await changeLocalBin(sample.id, binDraft)
+    }
+    setEditingBinId(null)
+  }
+
   const errorMessage = error ?? runError ?? mouldError
 
   return (
@@ -82,12 +145,26 @@ export default function SampleCards() {
           <Typography component="h1" variant="h3" color="#344a34">成纸样本与透光检验卡</Typography>
           <Typography color="text.secondary" sx={{ mt: 0.75 }}>按匀度与帘纹条数分档，复核样本对应的抄纸工序和归档位置。</Typography>
         </Box>
-        <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-sample">
-          {showForm ? '收起登记' : '新建样本'}
-        </Button>
+        <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+          <Button variant="outlined" size="large" onClick={() => fileInputRef.current?.click()} disabled={importing} data-testid="import-scan">
+            {importing ? '对账中…' : '导入清点扫描'}
+          </Button>
+          <Tooltip title="按当前台账编号生成一份示例扫描结果（含漏扫与未知编号）">
+            <Button variant="outlined" size="large" onClick={handleDemoImport} disabled={importing} data-testid="demo-scan">
+              示例扫描
+            </Button>
+          </Tooltip>
+          <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-sample">
+            {showForm ? '收起登记' : '新建样本'}
+          </Button>
+          <input ref={fileInputRef} type="file" accept="application/json,.json" hidden onChange={handleScanFile} data-testid="scan-file-input" />
+        </Stack>
       </Box>
 
       {errorMessage && <Alert severity="warning">{errorMessage}</Alert>}
+      {notice && !error && (
+        <Alert severity="success" onClose={clearNotice} data-testid="reconcile-report">{notice}</Alert>
+      )}
 
       {showForm && (
         <Card data-testid="form-sample" sx={{ borderColor: '#9eb096' }}>
@@ -122,7 +199,40 @@ export default function SampleCards() {
         <StatBadge label="样本总数" value={samples.length} detail="档案柜入库数量" />
         <StatBadge label="密纹样本" value={denseCount} detail="帘纹条数不少于 50" tone="bamboo" />
         <StatBadge label="待复检" value={recheckCount} detail="匀度非“均匀”" tone={recheckCount ? 'warning' : 'neutral'} />
+        <StatBadge label="未落实样本" value={unsettledSamples.length} detail="争议未处理或漏扫留柜" tone={unsettledSamples.length ? 'warning' : 'neutral'} />
       </Box>
+
+      {conflictSamples.length > 0 && (
+        <Card data-testid="conflict-panel" sx={{ borderColor: '#d9a928', bgcolor: '#fff8e6' }}>
+          <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
+            <Typography variant="h5" sx={{ mb: 0.5 }}>柜位争议（{conflictSamples.length}）</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              本机台账与清点器同时改了同一张样本。争议处理前样本不占新格，双方位置都保留。
+            </Typography>
+            <Stack spacing={1.5}>
+              {conflictSamples.map((sample) => (
+                <Box key={sample.id ?? sample.sampleNo} data-testid="conflict-row" sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Box>
+                    <Typography sx={{ fontWeight: 700 }}>{sample.sampleNo}</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      本机位置 <Chip size="small" label={sample.archiveBin} sx={{ mx: 0.5 }} />
+                      清点器位置 <Chip size="small" color="warning" label={sample.conflictBin ?? sample.scannedBin} sx={{ mx: 0.5 }} />
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1}>
+                    <Button size="small" variant="outlined" onClick={() => sample.id !== undefined && settleConflictKeepLocal(sample.id)} data-testid={`keep-local-${sample.sampleNo}`}>
+                      保留本机位
+                    </Button>
+                    <Button size="small" variant="contained" color="warning" onClick={() => sample.id !== undefined && settleConflictKeepScanned(sample.id)} data-testid={`keep-scan-${sample.sampleNo}`}>
+                      采用清点器位
+                    </Button>
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardContent sx={{ p: { xs: 2, md: 2.5 } }}>
@@ -139,7 +249,11 @@ export default function SampleCards() {
             <Grid item xs={6} md={2}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}><Typography variant="body2" color="text.secondary">当前记录</Typography><Typography variant="h5" data-testid="count-sample">{filteredSamples.length}</Typography></Box>
             </Grid>
-            <Grid item xs={6} md={3}><Button fullWidth variant="outlined" onClick={() => { setEvennessFilter('全部'); setStripeFloor(0) }}>重置分档</Button></Grid>
+            <Grid item xs={6} md={3}>
+              <Button fullWidth variant={onlyUnsettled ? 'contained' : 'outlined'} color={onlyUnsettled ? 'warning' : 'primary'} onClick={() => setOnlyUnsettled((value) => !value)} data-testid="filter-unsettled">
+                {onlyUnsettled ? '只看未落实 · 已开启' : '只看未落实'}
+              </Button>
+            </Grid>
           </Grid>
         </CardContent>
       </Card>
@@ -150,15 +264,20 @@ export default function SampleCards() {
           const mould = run ? mouldById.get(run.mouldId) : undefined
           const tier = stripeTier(sample.stripeCount)
           const gap = run?.measuredGap ?? mould?.stripeGap ?? 1
+          const missedInLatest = latestBatch !== undefined && !sample.binConflict && sample.lastScanBatch !== latestBatch
           return (
-            <Card key={sample.id ?? sample.sampleNo} data-testid="row-sample" sx={{ bgcolor: sample.evenness === '均匀' ? '#fffdf7' : '#fff9e8' }}>
+            <Card key={sample.id ?? sample.sampleNo} data-testid="row-sample" sx={{ bgcolor: sample.binConflict ? '#fff3d6' : sample.evenness === '均匀' ? '#fffdf7' : '#fff9e8', borderColor: sample.binConflict ? '#d9a928' : undefined }}>
               <CardContent sx={{ p: 2.25 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1.5, alignItems: 'flex-start', mb: 1.5 }}>
                   <Box>
                     <Typography variant="h6" sx={{ fontWeight: 800 }}>{sample.sampleNo}</Typography>
                     <Typography variant="caption" color="text.secondary">工序 {run?.runNo ?? '待关联'} · {run?.runDate ?? '日期待补'}</Typography>
                   </Box>
-                  <Chip size="small" color={tier.color} label={tier.label} />
+                  <Stack spacing={0.5} alignItems="flex-end">
+                    <Chip size="small" color={tier.color} label={tier.label} />
+                    {sample.binConflict && <Chip size="small" color="warning" label="柜位争议" data-testid={`conflict-chip-${sample.sampleNo}`} />}
+                    {missedInLatest && <Chip size="small" variant="outlined" color="warning" label="漏扫留柜" data-testid={`missed-chip-${sample.sampleNo}`} />}
+                  </Stack>
                 </Box>
                 <GrainStripePreview
                   gap={gap}
@@ -173,9 +292,39 @@ export default function SampleCards() {
                   <Grid item xs={6}><Typography variant="caption" color="text.secondary">样本尺寸</Typography><Typography>{sample.sizeMm} mm · {mmToCm(sample.sizeMm)} cm</Typography></Grid>
                   <Grid item xs={6}><Typography variant="caption" color="text.secondary">纸页克重</Typography><Typography>{run ? formatGrammage(run.grammage) : '待补'}</Typography></Grid>
                 </Grid>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', mt: 1.5 }}>
-                  <Chip size="small" variant="outlined" label={`存档 ${sample.archiveBin}`} />
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', mt: 1.5, flexWrap: 'wrap' }}>
+                  {editingBinId === sample.id ? (
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <TextField
+                        size="small"
+                        label="本机柜格"
+                        defaultValue={sample.archiveBin}
+                        autoFocus
+                        onChange={(event) => setBinDraft(event.target.value)}
+                        onKeyDown={(event) => { if (event.key === 'Enter') void saveBinDraft(sample) }}
+                        inputProps={{ 'data-testid': `bin-input-${sample.sampleNo}` }}
+                      />
+                      <Button size="small" onClick={() => void saveBinDraft(sample)} data-testid={`bin-save-${sample.sampleNo}`}>保存</Button>
+                      <Button size="small" onClick={() => setEditingBinId(null)}>取消</Button>
+                    </Stack>
+                  ) : (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`存档 ${sample.archiveBin}`}
+                      onClick={() => { setEditingBinId(sample.id ?? null); setBinDraft(sample.archiveBin) }}
+                      data-testid={`bin-chip-${sample.sampleNo}`}
+                    />
+                  )}
                   {run && isGapOutOfTolerance(run.deviation) && <Chip size="small" color="warning" label={`偏差 ${run.deviation > 0 ? '+' : ''}${run.deviation.toFixed(2)} mm`} />}
+                </Box>
+                <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {sample.relocationBatch
+                    ? <Chip size="small" variant="outlined" label={`批次 ${sample.relocationBatch}`} data-testid={`batch-chip-${sample.sampleNo}`} />
+                    : <Chip size="small" variant="outlined" label="搬迁前旧柜" />}
+                  {sample.binConflict && sample.conflictBin && (
+                    <Chip size="small" color="warning" variant="outlined" label={`清点器主张 ${sample.conflictBin}`} />
+                  )}
                 </Box>
               </CardContent>
             </Card>
