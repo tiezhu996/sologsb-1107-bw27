@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react'
-import { Alert, Box, Card, CardContent, Chip, Divider, Grid, LinearProgress, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material'
+import { Alert, Box, Button, Card, CardContent, Chip, Divider, Grid, LinearProgress, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material'
+import { Link as RouterLink } from 'react-router-dom'
 import { ProcessTimeline, type ProcessStep } from '../components/common/ProcessTimeline'
 import { StatBadge } from '../components/common/StatBadge'
 import { useMouldFilter } from '../hooks/useMouldFilter'
@@ -7,7 +8,20 @@ import { useFiberStore } from '../stores/fiberStore'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
 import { useSampleStore } from '../stores/sampleStore'
+import type { DisputeReason, RelocationStatus } from '../types/paper-sample'
 import { isGapOutOfTolerance } from '../utils/stripe'
+
+const relocationStatusText: Record<RelocationStatus, string> = {
+  missed: '漏扫·仍在原柜',
+  disputed: '争议·未占新格',
+  settled: '搬迁已落实',
+}
+
+const disputeReasonText: Record<DisputeReason, string> = {
+  'bin-edited-locally': '双方都改过位置',
+  'bin-already-taken': '新格已被占用',
+  'scan-duplicate': '扫描记录冲突',
+}
 
 function startOfCurrentWeek(): Date {
   const date = new Date()
@@ -65,6 +79,13 @@ export default function Dashboard() {
     }),
     [runById, samples],
   )
+  const unsettledSamples = useMemo(
+    () =>
+      samples.filter(
+        (sample) => sample.relocationStatus === 'missed' || sample.relocationStatus === 'disputed',
+      ),
+    [samples],
+  )
   const activeRate = moulds.length ? Math.round((activeMoulds.length / moulds.length) * 100) : 0
   const error = mouldError ?? batchError ?? runError ?? sampleError
 
@@ -86,6 +107,7 @@ export default function Dashboard() {
         <StatBadge label="纤维料批" value={batches.length} detail="覆盖四类造纸纤维" tone="bamboo" />
         <StatBadge label="本周工序" value={currentWeekRuns.length} detail="按自然周统计" tone="bamboo" />
         <StatBadge label="待复检样本" value={pendingSamples.length} detail="匀度或帘纹偏差需复核" tone={pendingSamples.length ? 'warning' : 'neutral'} />
+        <StatBadge label="搬迁未落实" value={unsettledSamples.length} detail="漏扫留原柜或柜位争议" tone={unsettledSamples.length ? 'warning' : 'neutral'} />
       </Box>
 
       <Grid container spacing={2.5}>
@@ -183,6 +205,55 @@ export default function Dashboard() {
                 {pendingSamples.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={6} align="center" sx={{ py: 4 }}>当前没有待复检样本</TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </Box>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="unsettled-card">
+        <CardContent sx={{ p: { xs: 2, md: 3 } }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 1.5 }}>
+            <Box>
+              <Typography variant="h5">搬迁未落实样本</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                漏扫样本仍留在原柜；双方都改过位置时保留双方柜格并标争议，争议处理前不占新格。
+              </Typography>
+            </Box>
+            <Button component={RouterLink} to="/samples" size="small" variant="outlined">前往对账</Button>
+          </Box>
+          <Box sx={{ overflowX: 'auto' }}>
+            <Table size="small" sx={{ minWidth: 720 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell>样本号</TableCell>
+                  <TableCell>状态</TableCell>
+                  <TableCell>本机/原柜位</TableCell>
+                  <TableCell>扫描新格</TableCell>
+                  <TableCell>争议原因</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {unsettledSamples.map((sample) => (
+                  <TableRow key={sample.id ?? sample.sampleNo} sx={{ bgcolor: sample.relocationStatus === 'disputed' ? '#fdecea' : '#fff8df' }} data-testid={`unsettled-row-${sample.sampleNo}`}>
+                    <TableCell sx={{ fontWeight: 700 }}>{sample.sampleNo}</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        color={sample.relocationStatus === 'disputed' ? 'error' : 'warning'}
+                        label={sample.relocationStatus ? relocationStatusText[sample.relocationStatus] : ''}
+                      />
+                    </TableCell>
+                    <TableCell>{sample.previousBin ?? sample.archiveBin}</TableCell>
+                    <TableCell>{sample.scannedBin ?? '—'}</TableCell>
+                    <TableCell>{sample.disputeReason ? disputeReasonText[sample.disputeReason] : '等待补扫'}</TableCell>
+                  </TableRow>
+                ))}
+                {unsettledSamples.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center" sx={{ py: 4 }}>全部样本已落实到新库房柜格</TableCell>
                   </TableRow>
                 )}
               </TableBody>

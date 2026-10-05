@@ -7,3 +7,4 @@ dist/
 .vscode/
 output/
 test-results/
+frontend/scripts/.verify-relocation.mjs

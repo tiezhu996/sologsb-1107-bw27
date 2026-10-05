@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Box, Button, Card, CardContent, Chip, Grid, Stack, TextField, Typography } from '@mui/material'
 import { GrainStripePreview } from '../components/common/GrainStripePreview'
+import { RelocationPanel } from '../components/common/RelocationPanel'
 import { RulerInput } from '../components/common/RulerInput'
 import { StatBadge } from '../components/common/StatBadge'
 import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
 import { useSampleStore } from '../stores/sampleStore'
-import { EVENNESS_LEVELS, type EvennessLevel, type PaperSampleInput } from '../types/paper-sample'
+import {
+  type DisputeReason,
+  EVENNESS_LEVELS,
+  type EvennessLevel,
+  type PaperSampleInput,
+  type RelocationStatus,
+} from '../types/paper-sample'
 import { isGapOutOfTolerance } from '../utils/stripe'
 
 const emptySampleForm: PaperSampleInput = {
@@ -23,6 +30,18 @@ function stripeTier(count: number): { label: string; color: 'success' | 'info' |
   if (count >= 50) return { label: '密纹档', color: 'success' }
   if (count >= 40) return { label: '中密档', color: 'info' }
   return { label: '疏纹档', color: 'warning' }
+}
+
+const relocationStatusMeta: Record<RelocationStatus, { label: string; color: 'warning' | 'error' | 'success' }> = {
+  missed: { label: '漏扫·仍在原柜', color: 'warning' },
+  disputed: { label: '争议·未占新格', color: 'error' },
+  settled: { label: '搬迁已落实', color: 'success' },
+}
+
+const disputeReasonText: Record<DisputeReason, string> = {
+  'bin-edited-locally': '本机与扫描双方都改过位置',
+  'bin-already-taken': '扫描新格已被其他样本占用',
+  'scan-duplicate': '扫描文件内同号记录冲突',
 }
 
 export default function SampleCards() {
@@ -57,6 +76,10 @@ export default function SampleCards() {
   )
   const denseCount = samples.filter((sample) => sample.stripeCount >= 50).length
   const recheckCount = samples.filter((sample) => sample.evenness !== '均匀').length
+  const unsettledCount = samples.filter(
+    (sample) => sample.relocationStatus === 'missed' || sample.relocationStatus === 'disputed',
+  ).length
+  const disputedCount = samples.filter((sample) => sample.relocationStatus === 'disputed').length
 
   const updateForm = <K extends keyof PaperSampleInput,>(key: K, value: PaperSampleInput[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -88,6 +111,8 @@ export default function SampleCards() {
       </Box>
 
       {errorMessage && <Alert severity="warning">{errorMessage}</Alert>}
+
+      <RelocationPanel />
 
       {showForm && (
         <Card data-testid="form-sample" sx={{ borderColor: '#9eb096' }}>
@@ -122,6 +147,8 @@ export default function SampleCards() {
         <StatBadge label="样本总数" value={samples.length} detail="档案柜入库数量" />
         <StatBadge label="密纹样本" value={denseCount} detail="帘纹条数不少于 50" tone="bamboo" />
         <StatBadge label="待复检" value={recheckCount} detail="匀度非“均匀”" tone={recheckCount ? 'warning' : 'neutral'} />
+        <StatBadge label="搬迁未落实" value={unsettledCount} detail="漏扫留原柜或争议未决" tone={unsettledCount ? 'warning' : 'neutral'} />
+        {disputedCount > 0 && <StatBadge label="柜位争议" value={disputedCount} detail="双方都改过，保留双方柜格" tone="warning" />}
       </Box>
 
       <Card>
@@ -177,6 +204,25 @@ export default function SampleCards() {
                   <Chip size="small" variant="outlined" label={`存档 ${sample.archiveBin}`} />
                   {run && isGapOutOfTolerance(run.deviation) && <Chip size="small" color="warning" label={`偏差 ${run.deviation > 0 ? '+' : ''}${run.deviation.toFixed(2)} mm`} />}
                 </Box>
+                {sample.relocationStatus && (
+                  <Stack spacing={0.75} sx={{ mt: 1.25 }} data-testid={`relocation-${sample.sampleNo}`}>
+                    <Chip
+                      size="small"
+                      color={relocationStatusMeta[sample.relocationStatus].color}
+                      label={
+                        sample.disputeReason
+                          ? `${relocationStatusMeta[sample.relocationStatus].label} · ${disputeReasonText[sample.disputeReason]}`
+                          : relocationStatusMeta[sample.relocationStatus].label
+                      }
+                    />
+                    {sample.previousBin && (
+                      <Typography variant="caption" color="text.secondary">
+                        原柜位 {sample.previousBin}
+                        {sample.scannedBin ? ` · 扫描新格 ${sample.scannedBin}（待处理）` : sample.relocationStatus === 'settled' ? '（已搬入新格）' : '（仍留在原柜）'}
+                      </Typography>
+                    )}
+                  </Stack>
+                )}
               </CardContent>
             </Card>
           )
